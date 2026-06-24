@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.core.common import BOARD_COL, BOARD_ROW, BOARD_SIZE, GameBoard
 from src.core.config import ModelConfig, ensure_dir_for_file, resolve_model_path
+from src.core.game import GameEngine
 
 # ==================== 神经网络配置参数 ====================
 NN_INPUT_SIZE = 18  # 输入层大小：3x3棋盘，每个位置2个特征（X和O）
@@ -165,66 +166,9 @@ def board_to_input(board: list[list[str | None]]) -> np.ndarray:
     return inputs
 
 
-class TicTacToeGame:
-    """
-    井字棋游戏环境类
-
-    棋盘用一维列表表示，与C代码一致。
-    board[i] = None/空 -> '.'
-    board[i] = 'X' 或 'O'
-    """
-
-    def __init__(self):
-        self.board = [None] * BOARD_SIZE
-        self.current_player = 0  # 0=X先手, 1=O后手
-
-    def reset(self):
-        self.board = [None] * BOARD_SIZE
-        self.current_player = 0
-
-    def get_symbol(self, player: int) -> str:
-        return "X" if player == 0 else "O"
-
-    def make_move(self, pos: int) -> bool:
-        if pos < 0 or pos >= BOARD_SIZE or self.board[pos] is not None:
-            return False
-        self.board[pos] = self.get_symbol(self.current_player)
-        self.current_player = 1 - self.current_player
-        return True
-
-    def get_board_2d(self) -> list[list[str | None]]:
-        return [[self.board[i * 3 + j] for j in range(3)] for i in range(3)]
-
-    def get_available_moves(self) -> list[int]:
-        return [i for i in range(BOARD_SIZE) if self.board[i] is None]
-
-    def check_winner(self) -> str | None:
-        b = self.board
-        lines = [
-            (0, 1, 2),
-            (3, 4, 5),
-            (6, 7, 8),
-            (0, 3, 6),
-            (1, 4, 7),
-            (2, 5, 8),
-            (0, 4, 8),
-            (2, 4, 6),
-        ]
-        for a, b_idx, c in lines:
-            if (
-                self.board[a] is not None
-                and self.board[a] == self.board[b_idx] == self.board[c]
-            ):
-                return self.board[a]
-        return None
-
-    def is_game_over(self) -> tuple[bool, str | None]:
-        winner = self.check_winner()
-        if winner is not None:
-            return True, winner
-        if all(cell is not None for cell in self.board):
-            return True, "T"
-        return False, None
+class TicTacToeGame(GameEngine):
+    """向后兼容别名 — 使用 GameEngine 作为实现"""
+    pass
 
 
 def get_random_move(game: TicTacToeGame) -> int:
