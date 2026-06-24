@@ -15,6 +15,7 @@
 import pickle
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -28,12 +29,15 @@ from src.ai.train import (
     BOARD_ROW,
     BOARD_SIZE,
     NN_INPUT_SIZE,
+    LEARNING_RATE,
     NeuralNetwork,
     TicTacToeGame,
     board_to_input,
     get_computer_move,
     get_random_move,
+    learn_from_game,
 )
+from src.ai.opponents import Opponent, RandomOpponent, RuleBasedOpponent, NeuralNetOpponent
 from src.core.checkpoint import (
     AutoSaveCallback,
     CheckpointManager,
@@ -48,6 +52,33 @@ from src.core.config import (
     ensure_dir_for_file,
     resolve_model_path,
 )
+
+
+class TrainingLogger:
+    def __init__(self, log_file: str):
+        self.log_file = log_file
+
+    def log(self, message: str):
+        print(message)
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{self._get_timestamp()}] {message}\n")
+        except Exception:
+            pass
+
+    def log_metrics(self, episode: int, metrics: dict):
+        msg = (
+            f"Episode {episode}: "
+            f"WR_rule={metrics.get('win_rate_rule', 0):.2%}, "
+            f"WR_first={metrics.get('win_rate_first', 0):.2%}, "
+            f"WR_second={metrics.get('win_rate_second', 0):.2%}, "
+            f"epsilon={metrics.get('epsilon', 0):.4f}"
+        )
+        self.log(msg)
+
+    @staticmethod
+    def _get_timestamp() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 @dataclass
@@ -167,6 +198,10 @@ def train_with_checkpoint_and_firstmover(
     # 创建对手网络（用于自我对弈）
     opponent_nn = nn.copy()
 
+    # 预实例化无状态对手（避免每轮重复创建）
+    random_opponent = RandomOpponent()
+    rule_opponent = RuleBasedOpponent()
+
     logger.log("=" * 60)
     logger.log("开始增强版训练")
     logger.log(f"总轮次: {total_episodes}")
@@ -187,44 +222,56 @@ def train_with_checkpoint_and_firstmover(
         game = TicTacToeGame()
         trajectory = []
 
-        # 选择对手
+        # 选择对手（使用预实例化的对象）
+        opponent_obj: Opponent
         if opponent_type == "random":
-            opponent_fn = random_opponent_move
+            opponent_obj = random_opponent
         elif opponent_type == "rule":
-            opponent_fn = rule_based_opponent_move
+            opponent_obj = rule_opponent
         elif opponent_type == "self_play":
-            opponent_fn = lambda g: self_play_move(opponent_nn, g, epsilon=0.3)
+            opponent_obj = NeuralNetOpponent(opponent_nn, epsilon=epsilon)
         else:  # mixed
             rand_val = np.random.rand()
             if rand_val < self_play_ratio:
-                opponent_fn = lambda g: self_play_move(opponent_nn, g, epsilon=0.3)
+                opponent_obj = NeuralNetOpponent(opponent_nn, epsilon=epsilon)
             elif rand_val < self_play_ratio + rule_opponent_ratio:
-                opponent_fn = rule_based_opponent_move
+                opponent_obj = rule_opponent
             else:
-                opponent_fn = random_opponent_move
+                opponent_obj = random_opponent
 
         # 游戏循环
-        while not game.is_game_over():
-            if game.current_player == ai_player:
-                # AI移动
-                inputs = board_to_input(game.get_board_state())
-                move_index = nn.get_best_move(
-                    inputs,
-                    game.get_board_state(),
-                    strategy="exploration",
-                    epsilon=epsilon,
-                )
-                move = (move_index // BOARD_COL, move_index % BOARD_COL)
+        ai_symbol = game.get_symbol(
+            0 if ai_player == "X" else 1
+        )
+        while True:
+            over, _ = game.is_game_over()
+            if over:
+                break
+
+            if game.get_symbol(game.current_player) == ai_player:
+                # AI移动 - epsilon-greedy
+                inputs = board_to_input(game.get_board_2d())
+                nn.forward(inputs)
+                available = game.get_available_moves()
+                if np.random.rand() < epsilon and available:
+                    move_index = available[np.random.randint(len(available))]
+                else:
+                    best_prob = -1.0
+                    move_index = -1
+                    for i in available:
+                        if nn.outputs[i] > best_prob:
+                            best_prob = nn.outputs[i]
+                            move_index = i
                 trajectory.append((inputs, move_index))
             else:
                 # 对手移动
-                move = opponent_fn(game)
+                move_index = opponent_obj.get_move(game)
 
-            game.make_move(move[0], move[1])
+            game.make_move(move_index)
 
         # 计算奖励
         winner = game.check_winner()
-        if winner == ai_player:
+        if winner == ai_symbol:
             reward = 1.0
         elif winner is not None:
             reward = -1.0
@@ -233,10 +280,11 @@ def train_with_checkpoint_and_firstmover(
 
         # 反向传播
         for idx, (inputs, move_index) in enumerate(reversed(trajectory)):
-            discounted_reward = reward * (discount_factor**idx)
-            targets = nn.forward(inputs)
-            targets[move_index] += discounted_reward
-            nn.backward(targets, learning_rate)
+            discounted_reward = reward * (discount_factor ** idx)
+            nn.forward(inputs)
+            target_probs = nn.outputs.copy()
+            target_probs[move_index] += discounted_reward
+            nn.backward(target_probs, learning_rate, discounted_reward)
 
         # 更新探索率
         epsilon = max(epsilon_end, epsilon * epsilon_decay)
@@ -256,13 +304,13 @@ def train_with_checkpoint_and_firstmover(
             # 分别评估AI作为先手和后的性能
             metrics_first = evaluate_with_firstmover(
                 nn,
-                rule_based_opponent_move,
+                RuleBasedOpponent(),
                 num_games=num_eval_games // 2,
                 ai_first=True,
             )
             metrics_second = evaluate_with_firstmover(
                 nn,
-                rule_based_opponent_move,
+                RuleBasedOpponent(),
                 num_games=num_eval_games // 2,
                 ai_first=False,
             )
@@ -331,7 +379,7 @@ def train_with_checkpoint_and_firstmover(
 
 def evaluate_with_firstmover(
     nn: NeuralNetwork,
-    opponent_fn: Callable,
+    opponent,
     num_games: int = 1000,
     ai_first: bool = True,
 ) -> Dict[str, float]:
@@ -340,12 +388,9 @@ def evaluate_with_firstmover(
 
     参数:
         nn (NeuralNetwork): 神经网络模型
-        opponent_fn: 对手策略函数
+        opponent: 对手（Opponent 对象或 callable(game) -> int）
         num_games (int): 评估游戏数
         ai_first (bool): AI是否先手
-
-    返回:
-        Dict[str, float]: 性能指标
     """
     wins = 0
     draws = 0
@@ -356,17 +401,21 @@ def evaluate_with_firstmover(
     for _ in range(num_games):
         game = TicTacToeGame()
 
-        while not game.is_game_over():
-            if game.current_player == ai_player:
-                inputs = board_to_input(game.get_board_state())
-                move_index = nn.get_best_move(
-                    inputs, game.get_board_state(), strategy="greedy"
-                )
-                move = (move_index // BOARD_COL, move_index % BOARD_COL)
-            else:
-                move = opponent_fn(game)
+        while True:
+            over, _ = game.is_game_over()
+            if over:
+                break
 
-            game.make_move(move[0], move[1])
+            if game.get_symbol(game.current_player) == ai_player:
+                inputs = board_to_input(game.get_board_2d())
+                move_index = nn.get_best_move(inputs, game.get_board_2d())
+            else:
+                if hasattr(opponent, "get_move"):
+                    move_index = opponent.get_move(game)
+                else:
+                    move_index = opponent(game)
+
+            game.make_move(move_index)
 
         winner = game.check_winner()
         if winner == ai_player:
@@ -403,23 +452,23 @@ def comprehensive_evaluation(
     # 评估对随机对手
     print("评估对随机对手（AI先手）...")
     results["random_first"] = evaluate_with_firstmover(
-        nn, random_opponent_move, num_games // 2, ai_first=True
+        nn, RandomOpponent(), num_games // 2, ai_first=True
     )
 
     print("评估对随机对手（AI后手）...")
     results["random_second"] = evaluate_with_firstmover(
-        nn, random_opponent_move, num_games // 2, ai_first=False
+        nn, RandomOpponent(), num_games // 2, ai_first=False
     )
 
     # 评估对规则对手
     print("评估对规则对手（AI先手）...")
     results["rule_first"] = evaluate_with_firstmover(
-        nn, rule_based_opponent_move, num_games // 2, ai_first=True
+        nn, RuleBasedOpponent(), num_games // 2, ai_first=True
     )
 
     print("评估对规则对手（AI后手）...")
     results["rule_second"] = evaluate_with_firstmover(
-        nn, rule_based_opponent_move, num_games // 2, ai_first=False
+        nn, RuleBasedOpponent(), num_games // 2, ai_first=False
     )
 
     # 计算综合指标

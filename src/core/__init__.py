@@ -6,6 +6,7 @@
 """
 
 from .common import BOARD_COL, BOARD_ROW, BOARD_SIZE, GameBoard
+from .game import GameEngine
 
 try:
     from .checkpoint import (
@@ -19,6 +20,7 @@ except ImportError:
 
 __all__ = [
     "GameBoard",
+    "GameEngine",
     "BOARD_SIZE",
     "BOARD_COL",
     "BOARD_ROW",

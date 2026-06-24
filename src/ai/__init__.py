@@ -18,10 +18,12 @@ from .train import (
     save_model,
     train_against_random,
 )
+from ..core.game import GameEngine
 
 __all__ = [
     "NeuralNetwork",
     "TicTacToeGame",
+    "GameEngine",
     "board_to_input",
     "get_random_move",
     "get_computer_move",
