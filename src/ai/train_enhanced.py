@@ -28,11 +28,13 @@ from src.ai.train import (
     BOARD_ROW,
     BOARD_SIZE,
     NN_INPUT_SIZE,
+    LEARNING_RATE,
     NeuralNetwork,
     TicTacToeGame,
     board_to_input,
     get_computer_move,
     get_random_move,
+    learn_from_game,
 )
 from src.core.checkpoint import (
     AutoSaveCallback,
@@ -48,6 +50,87 @@ from src.core.config import (
     ensure_dir_for_file,
     resolve_model_path,
 )
+
+
+class TrainingLogger:
+    def __init__(self, log_file: str):
+        self.log_file = log_file
+
+    def log(self, message: str):
+        print(message)
+        try:
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{self._get_timestamp()}] {message}\n")
+        except Exception:
+            pass
+
+    def log_metrics(self, episode: int, metrics: dict):
+        msg = (
+            f"Episode {episode}: "
+            f"WR_rule={metrics.get('win_rate_rule', 0):.2%}, "
+            f"WR_first={metrics.get('win_rate_first', 0):.2%}, "
+            f"WR_second={metrics.get('win_rate_second', 0):.2%}, "
+            f"epsilon={metrics.get('epsilon', 0):.4f}"
+        )
+        self.log(msg)
+
+    @staticmethod
+    def _get_timestamp() -> str:
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def random_opponent_move(game: TicTacToeGame) -> int:
+    available = game.get_available_moves()
+    return available[np.random.randint(len(available))]
+
+
+def rule_based_opponent_move(game: TicTacToeGame) -> int:
+    """简单规则对手：优先赢、其次堵、再占中心、最后随机"""
+    b = game.board
+    lines = [
+        (0, 1, 2), (3, 4, 5), (6, 7, 8),
+        (0, 3, 6), (1, 4, 7), (2, 5, 8),
+        (0, 4, 8), (2, 4, 6),
+    ]
+    my_symbol = game.get_symbol(game.current_player)
+    opp_symbol = "O" if my_symbol == "X" else "X"
+
+    for a, b_idx, c in lines:
+        cells = [b[a], b[b_idx], b[c]]
+        if cells.count(my_symbol) == 2 and cells.count(None) == 1:
+            empty_idx = [a, b_idx, c][cells.index(None)]
+            return empty_idx
+
+    for a, b_idx, c in lines:
+        cells = [b[a], b[b_idx], b[c]]
+        if cells.count(opp_symbol) == 2 and cells.count(None) == 1:
+            empty_idx = [a, b_idx, c][cells.index(None)]
+            return empty_idx
+
+    if b[4] is None:
+        return 4
+
+    available = game.get_available_moves()
+    return available[np.random.randint(len(available))]
+
+
+def self_play_move(
+    opponent_nn: NeuralNetwork, game: TicTacToeGame, epsilon: float = 0.0
+) -> int:
+    board_2d = game.get_board_2d()
+    inputs = board_to_input(board_2d)
+    opponent_nn.forward(inputs)
+    available = game.get_available_moves()
+    if np.random.rand() < epsilon and available:
+        return available[np.random.randint(len(available))]
+    best_move = -1
+    best_prob = -1.0
+    for i in available:
+        if opponent_nn.outputs[i] > best_prob:
+            best_prob = opponent_nn.outputs[i]
+            best_move = i
+    return best_move
 
 
 @dataclass
@@ -204,27 +287,38 @@ def train_with_checkpoint_and_firstmover(
                 opponent_fn = random_opponent_move
 
         # 游戏循环
-        while not game.is_game_over():
-            if game.current_player == ai_player:
-                # AI移动
-                inputs = board_to_input(game.get_board_state())
-                move_index = nn.get_best_move(
-                    inputs,
-                    game.get_board_state(),
-                    strategy="exploration",
-                    epsilon=epsilon,
-                )
-                move = (move_index // BOARD_COL, move_index % BOARD_COL)
+        ai_symbol = game.get_symbol(
+            0 if ai_player == "X" else 1
+        )
+        while True:
+            over, _ = game.is_game_over()
+            if over:
+                break
+
+            if game.get_symbol(game.current_player) == ai_player:
+                # AI移动 - epsilon-greedy
+                inputs = board_to_input(game.get_board_2d())
+                nn.forward(inputs)
+                available = game.get_available_moves()
+                if np.random.rand() < epsilon and available:
+                    move_index = available[np.random.randint(len(available))]
+                else:
+                    best_prob = -1.0
+                    move_index = -1
+                    for i in available:
+                        if nn.outputs[i] > best_prob:
+                            best_prob = nn.outputs[i]
+                            move_index = i
                 trajectory.append((inputs, move_index))
             else:
                 # 对手移动
-                move = opponent_fn(game)
+                move_index = opponent_fn(game)
 
-            game.make_move(move[0], move[1])
+            game.make_move(move_index)
 
         # 计算奖励
         winner = game.check_winner()
-        if winner == ai_player:
+        if winner == ai_symbol:
             reward = 1.0
         elif winner is not None:
             reward = -1.0
@@ -233,10 +327,11 @@ def train_with_checkpoint_and_firstmover(
 
         # 反向传播
         for idx, (inputs, move_index) in enumerate(reversed(trajectory)):
-            discounted_reward = reward * (discount_factor**idx)
-            targets = nn.forward(inputs)
-            targets[move_index] += discounted_reward
-            nn.backward(targets, learning_rate)
+            discounted_reward = reward * (discount_factor ** idx)
+            nn.forward(inputs)
+            target_probs = nn.outputs.copy()
+            target_probs[move_index] += discounted_reward
+            nn.backward(target_probs, learning_rate, discounted_reward)
 
         # 更新探索率
         epsilon = max(epsilon_end, epsilon * epsilon_decay)
@@ -356,17 +451,18 @@ def evaluate_with_firstmover(
     for _ in range(num_games):
         game = TicTacToeGame()
 
-        while not game.is_game_over():
-            if game.current_player == ai_player:
-                inputs = board_to_input(game.get_board_state())
-                move_index = nn.get_best_move(
-                    inputs, game.get_board_state(), strategy="greedy"
-                )
-                move = (move_index // BOARD_COL, move_index % BOARD_COL)
-            else:
-                move = opponent_fn(game)
+        while True:
+            over, _ = game.is_game_over()
+            if over:
+                break
 
-            game.make_move(move[0], move[1])
+            if game.get_symbol(game.current_player) == ai_player:
+                inputs = board_to_input(game.get_board_2d())
+                move_index = nn.get_best_move(inputs, game.get_board_2d())
+            else:
+                move_index = opponent_fn(game)
+
+            game.make_move(move_index)
 
         winner = game.check_winner()
         if winner == ai_player:

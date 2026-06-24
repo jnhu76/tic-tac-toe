@@ -113,6 +113,10 @@ class NeuralNetwork:
         self.weights_ih -= learning_rate * np.outer(self.inputs, hidden_deltas)
         self.biases_h -= learning_rate * hidden_deltas
 
+    def copy(self) -> "NeuralNetwork":
+        import copy as _copy
+        return _copy.deepcopy(self)
+
     def get_best_move(self, inputs: np.ndarray, board: list[list[str | None]]) -> int:
         """
         根据当前棋盘状态选择最佳合法移动
