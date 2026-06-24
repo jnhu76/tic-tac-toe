@@ -30,7 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.checkpoint import CheckpointManager, TrainingState, GameState
 from src.ai.train_enhanced import FirstMoverConfig, evaluate_with_firstmover
-from src.ai.train import NeuralNetwork, random_opponent_move, rule_based_opponent_move
+from src.ai.train import NeuralNetwork
+from src.ai.opponents import RandomOpponent, RuleBasedOpponent
 
 
 class PerformanceBenchmark:
@@ -245,15 +246,16 @@ class PerformanceBenchmark:
             print(f"  X比例: {x_count/100:.2%}")
             
             # 评估AI作为先手和后的性能
+            rule_opp = RuleBasedOpponent()
             if name == 'AI先手':
-                metrics_first = evaluate_with_firstmover(nn, rule_based_opponent_move, num_games, ai_first=True)
+                metrics_first = evaluate_with_firstmover(nn, rule_opp, num_games, ai_first=True)
                 metrics_second = {'win_rate': 0, 'draw_rate': 0, 'loss_rate': 0}
             elif name == 'AI后手':
                 metrics_first = {'win_rate': 0, 'draw_rate': 0, 'loss_rate': 0}
-                metrics_second = evaluate_with_firstmover(nn, rule_based_opponent_move, num_games, ai_first=False)
+                metrics_second = evaluate_with_firstmover(nn, rule_opp, num_games, ai_first=False)
             else:
-                metrics_first = evaluate_with_firstmover(nn, rule_based_opponent_move, num_games//2, ai_first=True)
-                metrics_second = evaluate_with_firstmover(nn, rule_based_opponent_move, num_games//2, ai_first=False)
+                metrics_first = evaluate_with_firstmover(nn, rule_opp, num_games//2, ai_first=True)
+                metrics_second = evaluate_with_firstmover(nn, rule_opp, num_games//2, ai_first=False)
             
             print(f"  AI先手胜率: {metrics_first['win_rate']:.2%}")
             print(f"  AI后手胜率: {metrics_second['win_rate']:.2%}")
@@ -294,7 +296,7 @@ class PerformanceBenchmark:
             # 模拟训练步骤
             inputs = np.random.randn(18)
             targets = np.random.randn(9)
-            nn1.backward(targets, 0.001)
+            nn1.backward(targets, 0.001, 1.0)
         
         time_no_checkpoint = time.time() - start_time
         print(f"  耗时: {time_no_checkpoint:.2f} 秒")
@@ -309,7 +311,7 @@ class PerformanceBenchmark:
             # 模拟训练步骤
             inputs = np.random.randn(18)
             targets = np.random.randn(9)
-            nn2.backward(targets, 0.001)
+            nn2.backward(targets, 0.001, 1.0)
             
             # 检查是否保存
             if cm.should_auto_save(episode):
