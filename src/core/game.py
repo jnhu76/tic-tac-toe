@@ -50,6 +50,9 @@ class GameEngine:
     def make_move(self, pos: int) -> bool:
         if pos < 0 or pos >= BOARD_SIZE or self.board[pos] is not None:
             return False
+        over, _ = self.is_game_over()
+        if over:
+            return False
         self.board[pos] = self.get_symbol(self.current_player)
         self.current_player = 1 - self.current_player
         return True

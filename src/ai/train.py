@@ -15,6 +15,7 @@
 日期：2026-04-13
 """
 
+import copy
 import pickle
 import sys
 from pathlib import Path
@@ -115,8 +116,7 @@ class NeuralNetwork:
         self.biases_h -= learning_rate * hidden_deltas
 
     def copy(self) -> "NeuralNetwork":
-        import copy as _copy
-        return _copy.deepcopy(self)
+        return copy.deepcopy(self)
 
     def get_best_move(self, inputs: np.ndarray, board: list[list[str | None]]) -> int:
         """

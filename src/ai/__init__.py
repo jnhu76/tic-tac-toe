@@ -18,7 +18,7 @@ from .train import (
     save_model,
     train_against_random,
 )
-from src.core.game import GameEngine
+from ..core.game import GameEngine
 
 __all__ = [
     "NeuralNetwork",

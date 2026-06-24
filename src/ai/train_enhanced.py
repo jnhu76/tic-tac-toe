@@ -15,6 +15,7 @@
 import pickle
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -77,61 +78,7 @@ class TrainingLogger:
 
     @staticmethod
     def _get_timestamp() -> str:
-        from datetime import datetime
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def random_opponent_move(game: TicTacToeGame) -> int:
-    available = game.get_available_moves()
-    return available[np.random.randint(len(available))]
-
-
-def rule_based_opponent_move(game: TicTacToeGame) -> int:
-    """简单规则对手：优先赢、其次堵、再占中心、最后随机"""
-    b = game.board
-    lines = [
-        (0, 1, 2), (3, 4, 5), (6, 7, 8),
-        (0, 3, 6), (1, 4, 7), (2, 5, 8),
-        (0, 4, 8), (2, 4, 6),
-    ]
-    my_symbol = game.get_symbol(game.current_player)
-    opp_symbol = "O" if my_symbol == "X" else "X"
-
-    for a, b_idx, c in lines:
-        cells = [b[a], b[b_idx], b[c]]
-        if cells.count(my_symbol) == 2 and cells.count(None) == 1:
-            empty_idx = [a, b_idx, c][cells.index(None)]
-            return empty_idx
-
-    for a, b_idx, c in lines:
-        cells = [b[a], b[b_idx], b[c]]
-        if cells.count(opp_symbol) == 2 and cells.count(None) == 1:
-            empty_idx = [a, b_idx, c][cells.index(None)]
-            return empty_idx
-
-    if b[4] is None:
-        return 4
-
-    available = game.get_available_moves()
-    return available[np.random.randint(len(available))]
-
-
-def self_play_move(
-    opponent_nn: NeuralNetwork, game: TicTacToeGame, epsilon: float = 0.0
-) -> int:
-    board_2d = game.get_board_2d()
-    inputs = board_to_input(board_2d)
-    opponent_nn.forward(inputs)
-    available = game.get_available_moves()
-    if np.random.rand() < epsilon and available:
-        return available[np.random.randint(len(available))]
-    best_move = -1
-    best_prob = -1.0
-    for i in available:
-        if opponent_nn.outputs[i] > best_prob:
-            best_prob = opponent_nn.outputs[i]
-            best_move = i
-    return best_move
 
 
 @dataclass
@@ -251,6 +198,10 @@ def train_with_checkpoint_and_firstmover(
     # 创建对手网络（用于自我对弈）
     opponent_nn = nn.copy()
 
+    # 预实例化无状态对手（避免每轮重复创建）
+    random_opponent = RandomOpponent()
+    rule_opponent = RuleBasedOpponent()
+
     logger.log("=" * 60)
     logger.log("开始增强版训练")
     logger.log(f"总轮次: {total_episodes}")
@@ -271,22 +222,22 @@ def train_with_checkpoint_and_firstmover(
         game = TicTacToeGame()
         trajectory = []
 
-        # 选择对手（使用 Opponent 协议）
+        # 选择对手（使用预实例化的对象）
         opponent_obj: Opponent
         if opponent_type == "random":
-            opponent_obj = RandomOpponent()
+            opponent_obj = random_opponent
         elif opponent_type == "rule":
-            opponent_obj = RuleBasedOpponent()
+            opponent_obj = rule_opponent
         elif opponent_type == "self_play":
-            opponent_obj = NeuralNetOpponent(opponent_nn, epsilon=0.3)
+            opponent_obj = NeuralNetOpponent(opponent_nn, epsilon=epsilon)
         else:  # mixed
             rand_val = np.random.rand()
             if rand_val < self_play_ratio:
-                opponent_obj = NeuralNetOpponent(opponent_nn, epsilon=0.3)
+                opponent_obj = NeuralNetOpponent(opponent_nn, epsilon=epsilon)
             elif rand_val < self_play_ratio + rule_opponent_ratio:
-                opponent_obj = RuleBasedOpponent()
+                opponent_obj = rule_opponent
             else:
-                opponent_obj = RandomOpponent()
+                opponent_obj = random_opponent
 
         # 游戏循环
         ai_symbol = game.get_symbol(

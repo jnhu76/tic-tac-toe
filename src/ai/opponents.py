@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+import numpy as np
+
+from src.ai.train import board_to_input
 from src.core.game import GameEngine
 
 
@@ -26,45 +29,43 @@ class RandomOpponent:
 
     def get_move(self, game: GameEngine) -> int:
         moves = game.get_legal_moves()
-        import numpy as np
+        if not moves:
+            raise ValueError("No legal moves — game is already over")
         return moves[np.random.randint(len(moves))]
 
 
 class RuleBasedOpponent:
     """
     规则对手 — 优先赢 → 堵对手 → 占中心 → 随机
-    与 train_enhanced.py 中的 rule_based_opponent_move 行为一致
     """
+
+    _WIN_LINES = [
+        (0, 1, 2), (3, 4, 5), (6, 7, 8),
+        (0, 3, 6), (1, 4, 7), (2, 5, 8),
+        (0, 4, 8), (2, 4, 6),
+    ]
 
     def get_move(self, game: GameEngine) -> int:
         b = game.board
-        lines = [
-            (0, 1, 2), (3, 4, 5), (6, 7, 8),
-            (0, 3, 6), (1, 4, 7), (2, 5, 8),
-            (0, 4, 8), (2, 4, 6),
-        ]
         my_symbol = game.get_symbol(game.current_player)
         opp_symbol = "O" if my_symbol == "X" else "X"
 
-        # 赢
-        for a, b_idx, c in lines:
+        for a, b_idx, c in self._WIN_LINES:
             cells = [b[a], b[b_idx], b[c]]
             if cells.count(my_symbol) == 2 and cells.count(None) == 1:
                 return [a, b_idx, c][cells.index(None)]
 
-        # 堵
-        for a, b_idx, c in lines:
+        for a, b_idx, c in self._WIN_LINES:
             cells = [b[a], b[b_idx], b[c]]
             if cells.count(opp_symbol) == 2 and cells.count(None) == 1:
                 return [a, b_idx, c][cells.index(None)]
 
-        # 中心
         if b[4] is None:
             return 4
 
-        # 随机
-        import numpy as np
         moves = game.get_legal_moves()
+        if not moves:
+            raise ValueError("No legal moves — game is already over")
         return moves[np.random.randint(len(moves))]
 
 
@@ -75,21 +76,20 @@ class NeuralNetOpponent:
     """
 
     def __init__(self, nn, epsilon: float = 0.0):
-        from src.ai.train import NeuralNetwork, board_to_input
         self.nn = nn
         self.epsilon = epsilon
-        self._board_to_input = board_to_input
 
     def get_move(self, game: GameEngine) -> int:
         board_2d = game.get_board_2d()
-        inputs = self._board_to_input(board_2d)
+        inputs = board_to_input(board_2d)
         self.nn.forward(inputs)
         moves = game.get_legal_moves()
 
-        if self.epsilon > 0.0:
-            import numpy as np
-            if np.random.rand() < self.epsilon:
-                return moves[np.random.randint(len(moves))]
+        if not moves:
+            raise ValueError("No legal moves — game is already over")
+
+        if self.epsilon > 0.0 and np.random.rand() < self.epsilon:
+            return moves[np.random.randint(len(moves))]
 
         best_move = -1
         best_prob = -1.0

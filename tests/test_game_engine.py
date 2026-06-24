@@ -3,7 +3,10 @@
 GameEngine、Opponent 协议和增强训练集成测试
 """
 
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -19,6 +22,13 @@ from src.ai.opponents import (
     NeuralNetOpponent,
     Opponent,
 )
+from src.ai.train_enhanced import (
+    FirstMoverConfig,
+    train_with_checkpoint_and_firstmover,
+    evaluate_with_firstmover,
+    comprehensive_evaluation,
+)
+from src.core.checkpoint import CheckpointManager
 
 
 # ======================== GameEngine tests ========================
@@ -146,29 +156,49 @@ class TestGameEngine:
         g2 = g.clone()
         assert g2.board[0] == "X"
         assert g2.board[4] == "O"
+        assert g2.current_player == g.current_player
         g2.make_move(8)
-        assert g.board[8] is None  # original unchanged
+        assert g.board[8] is None
+
+    def test_clone_preserves_current_player(self):
+        g = GameEngine()
+        g.make_move(0)
+        g2 = g.clone()
+        assert g2.current_player == 1
+        g2.make_move(1)
+        assert g.current_player == 1
 
     def test_full_game_x_wins(self):
         g = GameEngine()
-        # X: 0, 1, 2 (top row)
-        g.make_move(0)  # X
-        g.make_move(3)  # O
-        g.make_move(1)  # X
-        g.make_move(4)  # O
-        g.make_move(2)  # X wins
+        g.make_move(0)
+        g.make_move(3)
+        g.make_move(1)
+        g.make_move(4)
+        g.make_move(2)
         over, winner = g.is_game_over()
         assert over is True
         assert winner == "X"
 
     def test_full_game_tie(self):
         g = GameEngine()
-        moves = [0, 4, 8, 2, 6, 3, 5, 7, 1]  # alternating X/O
+        moves = [0, 4, 8, 2, 6, 3, 5, 7, 1]
         for m in moves:
             g.make_move(m)
         over, winner = g.is_game_over()
         assert over is True
         assert winner == "T"
+
+    def test_cannot_move_after_game_over(self):
+        g = GameEngine()
+        g.make_move(0)
+        g.make_move(3)
+        g.make_move(1)
+        g.make_move(4)
+        g.make_move(2)
+        over, _ = g.is_game_over()
+        assert over is True
+        assert g.make_move(5) is False
+        assert g.board[5] is None
 
 
 # ======================== TicTacToeGame inherits GameEngine ========================
@@ -211,20 +241,25 @@ class TestOpponentProtocol:
         move = opp.get_move(g)
         assert move in g.get_legal_moves()
 
+    def test_random_opponent_raises_on_finished_game(self):
+        g = GameEngine()
+        g.board = ["X", "X", "X", "O", "O", "O", "O", "X", "X"]
+        opp = RandomOpponent()
+        with pytest.raises(ValueError, match="No legal moves"):
+            opp.get_move(g)
+
     def test_rule_opponent_blocks_win(self):
         g = GameEngine()
-        # X at 0, 1 — O must block at 2
         g.board = ["X", "X", None, None, None, None, None, None, None]
-        g.current_player = 1  # O's turn
+        g.current_player = 1
         opp = RuleBasedOpponent()
         move = opp.get_move(g)
         assert move == 2
 
     def test_rule_opponent_takes_win(self):
         g = GameEngine()
-        # O at 3, 4 — O must take 5 to win
         g.board = [None, None, None, "O", "O", None, None, None, None]
-        g.current_player = 1  # O's turn
+        g.current_player = 1
         opp = RuleBasedOpponent()
         move = opp.get_move(g)
         assert move == 5
@@ -232,10 +267,34 @@ class TestOpponentProtocol:
     def test_rule_opponent_takes_center(self):
         g = GameEngine()
         g.board = ["X", None, None, None, None, None, None, None, None]
-        g.current_player = 1  # O's turn
+        g.current_player = 1
         opp = RuleBasedOpponent()
         move = opp.get_move(g)
         assert move == 4
+
+    def test_rule_opponent_chooses_first_win(self):
+        g = GameEngine()
+        g.board = ["O", "O", None, "O", "X", None, None, None, "X"]
+        g.current_player = 1
+        opp = RuleBasedOpponent()
+        move = opp.get_move(g)
+        assert move == 2
+
+    def test_rule_opponent_blocks_first_threat(self):
+        g = GameEngine()
+        g.board = ["X", "X", None, "O", "X", None, None, "O", None]
+        g.current_player = 1
+        opp = RuleBasedOpponent()
+        move = opp.get_move(g)
+        assert move == 2
+
+    def test_rule_opponent_raises_on_finished_game(self):
+        g = GameEngine()
+        g.board = ["X", "X", "X", "O", "O", "O", "O", "X", "X"]
+        g.current_player = 1
+        opp = RuleBasedOpponent()
+        with pytest.raises(ValueError, match="No legal moves"):
+            opp.get_move(g)
 
     def test_neural_net_opponent_returns_legal_move(self):
         g = GameEngine()
@@ -251,6 +310,14 @@ class TestOpponentProtocol:
         opp = NeuralNetOpponent(nn, epsilon=1.0)
         move = opp.get_move(g)
         assert move in g.get_legal_moves()
+
+    def test_neural_net_opponent_raises_on_finished_game(self):
+        g = GameEngine()
+        g.board = ["X", "X", "X", "O", "O", "O", "O", "X", "X"]
+        nn = NeuralNetwork()
+        opp = NeuralNetOpponent(nn)
+        with pytest.raises(ValueError, match="No legal moves"):
+            opp.get_move(g)
 
 
 # ======================== NeuralNetwork.copy tests ========================
@@ -282,45 +349,37 @@ class TestNeuralNetworkCopy:
 
 class TestEnhancedTraining:
     def test_import_all_functions(self):
-        from src.ai.train_enhanced import (
-            FirstMoverConfig,
-            train_with_checkpoint_and_firstmover,
-            evaluate_with_firstmover,
-            comprehensive_evaluation,
-            random_opponent_move,
-            rule_based_opponent_move,
-            self_play_move,
-        )
+        assert FirstMoverConfig is not None
+        assert train_with_checkpoint_and_firstmover is not None
+        assert evaluate_with_firstmover is not None
+        assert comprehensive_evaluation is not None
 
     def test_enhanced_training_smoke(self):
-        from src.ai.train_enhanced import (
-            FirstMoverConfig,
-            train_with_checkpoint_and_firstmover,
-        )
-        from src.core.checkpoint import CheckpointManager
-        import tempfile
-
         nn = NeuralNetwork()
-        cm = CheckpointManager(checkpoint_dir=tempfile.mkdtemp(), verbose=False)
-        cfg = FirstMoverConfig(ai_first_ratio=0.5)
-
-        nn = train_with_checkpoint_and_firstmover(
-            nn,
-            total_episodes=200,
-            learning_rate=0.1,
-            checkpoint_manager=cm,
-            firstmover_config=cfg,
-            opponent_type="random",
-            eval_interval=100,
-            log_interval=100,
-            num_eval_games=20,
-            model_save_path="/tmp/test_model_smoke.pkl",
-        )
-        assert nn is not None
+        temp_dir = tempfile.mkdtemp()
+        model_path = os.path.join(temp_dir, "test_model.pkl")
+        try:
+            cm = CheckpointManager(checkpoint_dir=temp_dir, verbose=False)
+            cfg = FirstMoverConfig(ai_first_ratio=0.5)
+            nn = train_with_checkpoint_and_firstmover(
+                nn,
+                total_episodes=200,
+                learning_rate=0.1,
+                checkpoint_manager=cm,
+                firstmover_config=cfg,
+                opponent_type="random",
+                eval_interval=100,
+                log_interval=100,
+                num_eval_games=20,
+                model_save_path=model_path,
+            )
+            assert nn is not None
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            if os.path.exists(model_path):
+                os.remove(model_path)
 
     def test_evaluate_with_firstmover(self):
-        from src.ai.train_enhanced import evaluate_with_firstmover
-
         nn = NeuralNetwork()
         opp = RuleBasedOpponent()
         result = evaluate_with_firstmover(nn, opp, num_games=20, ai_first=True)
@@ -330,8 +389,6 @@ class TestEnhancedTraining:
         assert abs(result["win_rate"] + result["draw_rate"] + result["loss_rate"] - 1.0) < 1e-6
 
     def test_evaluate_with_callable(self):
-        from src.ai.train_enhanced import evaluate_with_firstmover
-
         nn = NeuralNetwork()
 
         def simple_opponent(game):
@@ -341,8 +398,6 @@ class TestEnhancedTraining:
         assert "win_rate" in result
 
     def test_comprehensive_evaluation(self):
-        from src.ai.train_enhanced import comprehensive_evaluation
-
         nn = NeuralNetwork()
         results = comprehensive_evaluation(nn, num_games=20)
         assert "random_first" in results

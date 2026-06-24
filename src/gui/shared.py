@@ -28,7 +28,7 @@ from src.ai.train import NeuralNetwork
 from src.ai.train import board_to_input as nn_board_to_input
 from src.core.checkpoint import CheckpointManager, GameState
 from src.core.common import GameBoard
-from src.core.config import BEST_MODEL_PATH, DEFAULT_MODEL_PATH
+from src.core.config import BEST_MODEL_PATH, DEFAULT_MODEL_PATH, TrainingConfig
 
 
 # ==================== 资源路径 ====================
@@ -119,7 +119,9 @@ class GameGrid(GridLayout):
         self._ai_enabled = False
 
         self.checkpoint_manager = CheckpointManager(
-            checkpoint_dir="checkpoints/game", max_checkpoints=10, verbose=False
+            checkpoint_dir=f"{TrainingConfig.DEFAULT_CHECKPOINT_DIR}/game",
+            max_checkpoints=10,
+            verbose=False,
         )
 
         self.player_symbols = {0: "X", 1: "O"}
@@ -351,6 +353,15 @@ class GameGrid(GridLayout):
                 cell = self.board.board[row][col]
                 btn.text = cell if cell else ""
                 btn.disabled = self.game_over_flag
+
+            if self.game_over_flag:
+                if state.winner:
+                    self.update_status(f"游戏已加载！{state.winner} 获胜")
+                else:
+                    self.update_status("游戏已加载！平局")
+            else:
+                current_symbol = self.player_symbols[self.board.current_player]
+                self.update_status(f"游戏已加载！轮到 {current_symbol}")
 
             return True
         except Exception as e:
